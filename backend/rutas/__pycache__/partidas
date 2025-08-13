@@ -1,0 +1,17 @@
+from fastapi import APIRouter
+from pydantic import BaseModel
+from typing import Dict, List
+from db import db
+
+router = APIRouter()
+
+class Partida(BaseModel):
+    respuestas: Dict[str, int | None]
+    resultado: List[tuple]
+
+@router.post("/guardar_partida")
+def guardar_partida(partida: Partida):
+    coleccion = db["partidas"]
+    coleccion.insert_one(partida.dict())
+    return {"mensaje": "✅ Partida guardada correctamente"}
+

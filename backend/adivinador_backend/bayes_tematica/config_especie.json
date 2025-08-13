@@ -1,0 +1,7 @@
+{
+  "atributos": [
+    "especie_humano", "especie_mutante", "especie_dios_asgardiano", "especie_androide",
+    "especie_alienigena", "especie_hibrido_kree_humano", "especie_inhumano",
+    "especie_dios_jotun", "especie_flora_colossi", "especie_robot", "especie_animal_modificado"
+  ]
+}

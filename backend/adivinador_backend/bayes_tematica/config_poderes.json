@@ -1,0 +1,8 @@
+{
+  "atributos": [
+    "tiene_superfuerza", "puede_volar", "tiene_regeneracion", "tiene_elasticidad",
+    "tiene_telepatia", "tiene_telequinesis", "tiene_invisibilidad", "tiene_velocidad",
+    "tiene_vision_laser", "controla_fuego", "controla_hielo", "tiene_magia",
+    "controla_electricidad", "puede_cambiar_forma"
+  ]
+}

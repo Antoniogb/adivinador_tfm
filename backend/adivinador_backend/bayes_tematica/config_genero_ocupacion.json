@@ -1,0 +1,6 @@
+{
+  "atributos": [
+    "genero_hombre", "genero_mujer", "es_adolescente",
+    "es_cientifico", "es_soldado", "es_profesional"
+  ]
+}
