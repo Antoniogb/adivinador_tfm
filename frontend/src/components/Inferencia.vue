@@ -117,18 +117,23 @@ function terminarYGuardar(acertado) {
 function confirmarSI() { terminarYGuardar(true) }
 function confirmarNO() { terminarYGuardar(false) }
 
+function shuffleArray(arr) {
+  return arr
+    .map(value => ({ value, sort: Math.random() }))
+    .sort((a, b) => a.sort - b.sort)
+    .map(({ value }) => value)
+}
+
 async function cargarPreguntas() {
   try {
     const { data } = await api.get('/preguntas/activas')
-    preguntas.value = data.preguntas
-    // reset partida
+    preguntas.value = shuffleArray(data.preguntas) // 🔹 ahora baraja
     indice.value = 0
     respuestas.value = {}
     resultado.value = []
     respuestaConfirmada.value = null
     mostrandoConfirmacion.value = false
     candidato.value = ''
-    yaGuardado.value = false
   } catch (e) {
     console.error('❌ Error cargando preguntas:', e)
   }
