@@ -130,9 +130,28 @@ async function reiniciar() {
   pidiendoReal.value = false
   personajeReal.value = ''
 
-  // Si tienes /pregunta_siguiente, puedes llamar aquí a solicitarSiguientePregunta()
+  await solicitarSiguientePregunta() 
   await cargarPreguntasSecuencial() // fallback secuencial
   await inferir()
+}
+
+async function solicitarSiguientePregunta() {
+  try {
+    const excluidas = [] // si quieres forzar exclusiones, añade aquí
+    const { data } = await api.post('/pregunta_siguiente', {
+      respuestas: respuestas.value,
+      excluidas
+    })
+    if (data?.atributo) {
+      preguntaActual.value = { atributo: data.atributo, texto: data.texto }
+    } else {
+      // No quedan preguntas útiles
+      preguntaActual.value = null
+    }
+  } catch (e) {
+    console.error('❌ Error pidiendo pregunta siguiente:', e)
+    preguntaActual.value = null
+  }
 }
 
 async function cargarPreguntasSecuencial() {

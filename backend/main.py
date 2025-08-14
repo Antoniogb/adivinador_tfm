@@ -5,6 +5,7 @@ from servicios.inferencia_multiple import inferir_personaje_desde_redes
 from rutas.partidas import router as partidas_router
 from rutas.preguntas import router as preguntas_router
 from rutas.inferencia import router as inferencia_router
+from rutas.pregunta_siguiente import router as pregunta_siguiente_router
 
 app = FastAPI()
 
@@ -22,7 +23,7 @@ class RespuestasUsuario(BaseModel):
 app.include_router(partidas_router, tags=["Partidas"])
 
 app.include_router(inferencia_router)
-
+app.include_router(pregunta_siguiente_router)
 app.include_router(preguntas_router, prefix="/preguntas", tags=["Preguntas"])
 
 @app.post("/inferir")
