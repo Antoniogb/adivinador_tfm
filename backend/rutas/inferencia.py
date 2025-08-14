@@ -1,21 +1,30 @@
+# rutas/inferencia.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, List, Tuple
-from db_sql import cargar_personajes
+from typing import Dict, List, Tuple, Optional
 import json
 import numpy as np
 import pandas as pd
 import os
-from math import log, exp
+from math import log
+from db_sql import cargar_personajes  # <-- tu loader SQL -> DataFrame
 
 router = APIRouter()
 
+# ---------------------------------------------------------------------
+#  Modelos de request
+# ---------------------------------------------------------------------
 class RespuestasUsuario(BaseModel):
     respuestas: Dict[str, int | None]
 
-# -------------------
-# CONFIG
-# -------------------
+class EstadoUsuario(BaseModel):
+    respuestas: Dict[str, int | None] = {}
+    excluidas: List[str] = []  # opcional: atributos a no considerar
+
+
+# ---------------------------------------------------------------------
+#  Configuración / Paths de redes temáticas
+# ---------------------------------------------------------------------
 RUTAS_CONFIG = {
     "poderes":               "./adivinador_backend/bayes_tematica/config_poderes.json",
     "afiliaciones_heroes":   "./adivinador_backend/bayes_tematica/config_afiliaciones_heroes.json",
@@ -29,64 +38,58 @@ RUTAS_CONFIG = {
 ALPHA = 1.0   # suavizado de Laplace
 EPS   = 1e-9  # para evitar log(0)
 
-# -------------------
-# CACHE DE MODELOS
-# -------------------
-# Para cada red guardamos:
-# {
+# ---------------------------------------------------------------------
+#  Cache en memoria
+# ---------------------------------------------------------------------
+# MODELOS[red] = {
 #   "personajes": [str, ...],
-#   "prior_log": np.array(n_personajes),
-#   "attr_logs": {
-#       attr: {
-#           0: np.array(n_personajes)  # log P(attr=0 | personaje)
-#           1: np.array(n_personajes)  # log P(attr=1 | personaje)
-#       }, ...
-#   },
-#   "attrs": [attr, ...]
+#   "prior_log": np.ndarray (nP),
+#   "attr_logs": { attr: {0: np.ndarray(nP), 1: np.ndarray(nP)} },
+#   "attrs": [str, ...]
 # }
 MODELOS: dict[str, dict] = {}
 PERSONAJES_CANON: List[str] = []  # orden canónico de personajes
 
+# Mongo opcional para texto de preguntas
+try:
+    from db import db as mongo_db  # colección "preguntas"
+except Exception:
+    mongo_db = None
+
+
+# ---------------------------------------------------------------------
+#  Helpers de entrenamiento/carga
+# ---------------------------------------------------------------------
+def _cargar_config(ruta: str) -> List[str]:
+    with open(ruta, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    return list(cfg.get("atributos", []))
 
 def _entrenar_red(df: pd.DataFrame, attrs: List[str]) -> dict:
     """
     Entrena Naive Bayes binario P(personaje) y P(attr|personaje) con Laplace.
+    df debe tener 'personaje' (nombres) + attrs binarios 0/1.
     """
-    # Asegura columnas binarias 0/1 presentes
     attrs = [a for a in attrs if a in df.columns]
     if not attrs:
         raise ValueError("Sin atributos válidos para esta red")
 
-    # Personajes y orden canónico
     global PERSONAJES_CANON
     if not PERSONAJES_CANON:
-        PERSONAJES_CANON = df["personaje"].tolist() if df["personaje"].dtype != object else df["personaje"].unique().tolist()
+        PERSONAJES_CANON = list(df["personaje"].astype(str).unique())
 
-    # Si "personaje" es nombre, mantenemos PERSONAJES_CANON como lista de nombres
-    # y construimos vista por personaje
-    # Contadores por personaje
-    # prior: conteo de cada personaje
+    # Conteos por personaje
     conteo_personaje = df["personaje"].value_counts().reindex(PERSONAJES_CANON, fill_value=0).astype(float)
     total = float(conteo_personaje.sum())
     prior = (conteo_personaje + ALPHA) / (total + ALPHA * len(PERSONAJES_CANON))
     prior_log = np.log(np.clip(prior.values, EPS, None))
 
-    # Para cada atributo binario, contamos #1 y #0 por personaje
-    attr_logs = {}
+    attr_logs: dict[str, dict[int, np.ndarray]] = {}
     for a in attrs:
-        # valores 0/1; si hay NaN, tratamos como 0 (o podrías ignorarlos)
-        col = df[a].fillna(0).astype(int)
-        # agrupamos por personaje
-        # true_count[p] = cuántas filas de p tienen a==1
         true_count = df.groupby("personaje")[a].sum().reindex(PERSONAJES_CANON, fill_value=0).astype(float)
-        # total por personaje
         n_p = conteo_personaje
-
-        # Laplace: P(a=1|p) = (true_count + α) / (n_p + 2α)
         p1 = (true_count + ALPHA) / (n_p + 2.0 * ALPHA)
         p0 = 1.0 - p1
-
-        # guarda logs
         attr_logs[a] = {
             1: np.log(np.clip(p1.values, EPS, None)),
             0: np.log(np.clip(p0.values, EPS, None)),
@@ -99,156 +102,278 @@ def _entrenar_red(df: pd.DataFrame, attrs: List[str]) -> dict:
         "attrs": attrs,
     }
 
-
-def _cargar_config(ruta: str) -> List[str]:
-    with open(ruta, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    # esperamos {"atributos": ["a","b",...]}
-    return list(cfg.get("atributos", []))
-
-
 def _asegurar_modelos(df: pd.DataFrame):
     """
     Entrena y cachea modelos si no están ya listos.
+    df: contiene al menos 'nombre'/'personaje' y columnas binarias 0/1.
     """
     global MODELOS, PERSONAJES_CANON
 
-    # Normaliza df: columna 'personaje' (nombres) y asegura 0/1 en attrs
-    if "nombre" in df.columns and "personaje" not in df.columns:
+    if "personaje" not in df.columns:
         df = df.copy()
         df["personaje"] = df["nombre"]
 
-    # Asegura binarios 0/1 en todo lo que no sea 'personaje' (si hay NaN -> 0)
+    # Fuerza 0/1 en todas las columnas binarias
     bin_cols = [c for c in df.columns if c not in ("personaje", "nombre", "id")]
     df[bin_cols] = df[bin_cols].fillna(0).astype(int)
 
-    # Fija orden canónico de personajes (nombres)
     if not PERSONAJES_CANON:
-        # usa el orden de aparición
         PERSONAJES_CANON = list(df["personaje"].astype(str).unique())
 
-    # Entrena cada red si falta
     for nombre_red, ruta in RUTAS_CONFIG.items():
         if nombre_red in MODELOS:
             continue
         if not os.path.exists(ruta):
-            # si no existe el config, sáltala
-            print(f"⚠️  Config no encontrada para red '{nombre_red}': {ruta} (se ignora esta red)")
+            print(f"⚠️  Config no encontrada para red '{nombre_red}': {ruta} (se ignora)")
             continue
         try:
             attrs = _cargar_config(ruta)
-            modelo = _entrenar_red(df[["personaje"] + [a for a in attrs if a in df.columns]], attrs)
+            subset_cols = ["personaje"] + [a for a in attrs if a in df.columns]
+            modelo = _entrenar_red(df[subset_cols], attrs)
             MODELOS[nombre_red] = modelo
             print(f"✅ Red '{nombre_red}' entrenada con {len(modelo['attrs'])} atributos")
         except Exception as e:
             print(f"❌ Error entrenando red '{nombre_red}': {e}")
 
 
+# ---------------------------------------------------------------------
+#  Helpers de inferencia/combinar
+# ---------------------------------------------------------------------
 def _posterior_por_red(modelo: dict, evidencia: Dict[str, int | None]) -> Tuple[np.ndarray, int]:
     """
     Devuelve (log_posterior_normalizado, evidencia_utilizada)
-    Solo usa atributos presentes en evidencia y que existan en el modelo.
+    Usa solo attrs presentes en evidencia (0/1) y existentes en el modelo.
     """
-    prior_log = modelo["prior_log"].copy()
-    attrs = modelo["attrs"]
-    attr_logs = modelo["attr_logs"]
-
+    suma = modelo["prior_log"].copy()
     usados = 0
-    suma = prior_log.copy()
     for a, v in evidencia.items():
         if v is None:
             continue
-        if a not in attrs:
+        if a not in modelo["attrs"]:
             continue
         if v not in (0, 1):
             continue
-        suma += attr_logs[a][v]
+        suma += modelo["attr_logs"][a][v]
         usados += 1
 
-    # normaliza para obtener probs: softmax estable
+    # normaliza (softmax estable)
     m = float(np.max(suma))
     exps = np.exp(suma - m)
     probs = exps / np.sum(exps)
-    # para combinar entre redes, volvemos a log con EPS
     log_post = np.log(np.clip(probs, EPS, None))
     return log_post, usados
 
-
 def _combinar_redes(resultados: List[Tuple[np.ndarray, int]]) -> np.ndarray:
     """
-    Combina posteriors de cada red con peso = max(1, evidencia_usada_en_red).
-    Trabaja en log-espacio para estabilidad.
+    Combina posteriors con peso = max(1, evidencia_en_red).
+    Trabaja en log-espacio y devuelve probs normalizadas.
     """
     if not resultados:
         raise ValueError("No hay resultados de redes")
-
-    # suma ponderada de log-probs
     acumulado = None
     for logp, usados in resultados:
-        peso = max(1, usados)  # si una red no aporta evidencia, que pese 1 (neutral)
+        peso = max(1, usados)
         term = peso * logp
         acumulado = term if acumulado is None else acumulado + term
 
-    # normaliza
     m = float(np.max(acumulado))
     exps = np.exp(acumulado - m)
     probs = exps / np.sum(exps)
-    return probs  # vector de tamaño n_personajes
+    return probs
+
+def _posterior_actual(respuestas: Dict[str, int | None]) -> Tuple[List[str], np.ndarray]:
+    """
+    Usa los MODELOS cacheados para obtener P(personaje | respuestas) actual.
+    Devuelve (lista_personajes, vector_probs).
+    """
+    if not MODELOS:
+        raise RuntimeError("MODELOS no entrenados. Llama a /inferir tras arrancar o entrena con _asegurar_modelos.")
+    resultados_red = []
+    for nombre_red, modelo in MODELOS.items():
+        try:
+            logp, usados = _posterior_por_red(modelo, respuestas)
+            resultados_red.append((logp, usados))
+        except Exception as e:
+            print(f"❌ Error en red {nombre_red}: {e}")
+    if not resultados_red:
+        raise RuntimeError("No se pudo calcular ninguna red para el estado actual.")
+    probs = _combinar_redes(resultados_red)
+    personajes = MODELOS[next(iter(MODELOS))]["personajes"]
+    return personajes, probs
+
+def _entropia(probs: np.ndarray) -> float:
+    p = np.clip(probs, EPS, None)
+    return float(-np.sum(p * (np.log(p) / np.log(2.0))))
+
+def _p_attr_1(attr: str, personajes: List[str], p_personaje: np.ndarray) -> Optional[float]:
+    """
+    Estima P(attr=1) = sum_p P(p)*P(attr=1|p) usando la primera red que contenga el attr.
+    """
+    for modelo in MODELOS.values():
+        if attr in modelo["attrs"]:
+            p1 = np.exp(modelo["attr_logs"][attr][1])  # vector por personaje
+            return float(np.sum(p_personaje * p1))
+    return None
+
+def _ganancia_por_atributo(attr: str, respuestas: Dict[str, int | None]) -> Optional[Tuple[float, float, float]]:
+    """
+    Devuelve (ganancia_info, H0, H1) o None si no se puede evaluar.
+    Considera respuestas binarias (0/1).
+    """
+    if attr in respuestas and respuestas[attr] is not None:
+        return None
+    try:
+        # Distribución actual
+        personajes, p_cur = _posterior_actual(respuestas)
+        H_cur = _entropia(p_cur)
+
+        # P(attr=1) bajo estado actual
+        p1 = _p_attr_1(attr, personajes, p_cur)
+        if p1 is None:
+            return None
+        p1 = max(0.0, min(1.0, p1))
+        p0 = 1.0 - p1
+
+        # Posterior si respondiera 1
+        r1 = dict(respuestas); r1[attr] = 1
+        _, p_post1 = _posterior_actual(r1)
+        H1 = _entropia(p_post1)
+
+        # Posterior si respondiera 0
+        r0 = dict(respuestas); r0[attr] = 0
+        _, p_post0 = _posterior_actual(r0)
+        H0 = _entropia(p_post0)
+
+        H_exp = p1 * H1 + p0 * H0
+        gain = H_cur - H_exp
+        return (float(gain), float(H0), float(H1))
+    except Exception as e:
+        print(f"⚠️  No se pudo evaluar ganancia para '{attr}': {e}")
+        return None
+
+def _texto_atributo(attr: str) -> Optional[str]:
+    """
+    Busca el texto de la pregunta en Mongo (colección 'preguntas').
+    Esquema esperado: { atributo: 'es_vengador', texto: '¿Es vengador?', activa: true }
+    """
+    if mongo_db is None:
+        return None
+    try:
+        doc = mongo_db["preguntas"].find_one({"atributo": attr}, {"_id": 0, "texto": 1})
+        return doc.get("texto") if doc else None
+    except Exception:
+        return None
 
 
+# ---------------------------------------------------------------------
+#  Endpoint: Inferencia con umbral del 50%
+# ---------------------------------------------------------------------
 @router.post("/inferir")
 def inferir_personaje(datos: RespuestasUsuario):
     print("⚡ INFERENCIA ACTIVADA:", datos.respuestas)
     try:
-        # 1) Cargar dataset de entrenamiento (SQL -> DataFrame)
-        df = cargar_personajes()  # debe incluir columnas binarias y 'nombre'
+        # A) Cargar dataset y asegurar modelos (solo primera vez tras arranque)
+        df = cargar_personajes()
         if "personaje" not in df.columns:
             df["personaje"] = df["nombre"]
         if "id" in df.columns:
             df = df.drop(columns=["id"])
-
-        # 2) Entrenar/cargar modelos (cache)
         _asegurar_modelos(df)
 
-        if not MODELOS:
-            raise RuntimeError("No hay redes entrenadas ni configs válidas.")
-
-        # 3) Para cada red, obtener posterior y evidencia usada
-        resultados_red = []
-        for nombre_red, modelo in MODELOS.items():
-            try:
-                logp, usados = _posterior_por_red(modelo, datos.respuestas)
-                resultados_red.append((logp, usados))
-            except Exception as e:
-                print(f"❌ Error en red {nombre_red}: {e}")
-
-        if not resultados_red:
-            raise RuntimeError("No se pudo calcular ninguna red.")
-
-        # 4) Combinar redes (suma ponderada de log-posteriors)
-        probs = _combinar_redes(resultados_red)
-
-        # 5) Armar salida ordenada
-        personajes = MODELOS[next(iter(MODELOS))]["personajes"]  # orden canónico
+        # B) Posterior actual
+        personajes, probs = _posterior_actual(datos.respuestas)
         pares = list(zip(personajes, probs.tolist()))
         pares.sort(key=lambda x: x[1], reverse=True)
 
-        # 6) Umbral 50%
+        # C) Umbral 0.5 para propuesta
         umbral_alcanzado = False
-        personaje_candidato = None
+        candidato = None
         if pares and pares[0][1] >= 0.5:
             umbral_alcanzado = True
-            personaje_candidato = pares[0][0]
+            candidato = pares[0][0]
 
         top5 = pares[:5]
         print("🔍 TOP 3:", top5[:3])
-
         return {
             "resultado": top5,
             "umbral": umbral_alcanzado,
-            "candidato": personaje_candidato
+            "candidato": candidato
         }
 
     except Exception as e:
         print("❌ ERROR GENERAL en inferencia:", e)
         raise HTTPException(status_code=500, detail="Error en inferencia mejorada")
+
+
+# ---------------------------------------------------------------------
+#  Endpoint: Preguntas adaptativas (ganancia de información)
+# ---------------------------------------------------------------------
+@router.post("/pregunta_siguiente")
+def pregunta_siguiente(estado: EstadoUsuario):
+    """
+    Elige el siguiente atributo que maximiza la ganancia de información.
+    Devuelve { atributo, texto?, ganancia, p1, H_si_0, H_si_1 }.
+    """
+    try:
+        # Asegura MODELOS listos (por si no se llamó /inferir aún)
+        if not MODELOS:
+            df = cargar_personajes()
+            if "personaje" not in df.columns:
+                df["personaje"] = df["nombre"]
+            if "id" in df.columns:
+                df = df.drop(columns=["id"])
+            _asegurar_modelos(df)
+
+        # Candidatos = todos los attrs de todas las redes menos los excluidos/ya respondidos
+        candidatos: set[str] = set()
+        for modelo in MODELOS.values():
+            candidatos.update(modelo["attrs"])
+
+        excl = set(estado.excluidas or [])
+        for k, v in (estado.respuestas or {}).items():
+            if v is not None:
+                excl.add(k)
+
+        candidatos = [a for a in candidatos if a not in excl]
+        if not candidatos:
+            return {"atributo": None, "ganancia": 0.0, "mensaje": "No quedan preguntas útiles."}
+
+        mejor_attr = None
+        mejor_gain = -1e9
+        mejor_H0 = None
+        mejor_H1 = None
+
+        for a in candidatos:
+            res = _ganancia_por_atributo(a, estado.respuestas or {})
+            if res is None:
+                continue
+            gain, H0, H1 = res
+            if gain > mejor_gain:
+                mejor_gain = gain
+                mejor_attr = a
+                mejor_H0 = H0
+                mejor_H1 = H1
+
+        if mejor_attr is None:
+            return {"atributo": None, "ganancia": 0.0, "mensaje": "No se pudo evaluar ninguna pregunta."}
+
+        # Texto descriptivo si está en Mongo
+        txt = _texto_atributo(mejor_attr)
+
+        # P(attr=1) bajo el estado actual (útil para UI)
+        personajes, p_cur = _posterior_actual(estado.respuestas or {})
+        p1 = _p_attr_1(mejor_attr, personajes, p_cur)
+        p1 = float(max(0.0, min(1.0, p1))) if p1 is not None else None
+
+        return {
+            "atributo": mejor_attr,
+            "texto": txt,
+            "ganancia": float(mejor_gain),
+            "p1": p1,
+            "H_si_0": float(mejor_H0) if mejor_H0 is not None else None,
+            "H_si_1": float(mejor_H1) if mejor_H1 is not None else None,
+        }
+
+    except Exception as e:
+        print("❌ ERROR en /pregunta_siguiente:", e)
+        raise HTTPException(status_code=500, detail="Error calculando la pregunta siguiente")

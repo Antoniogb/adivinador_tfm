@@ -10,16 +10,44 @@ router = APIRouter()
 class Partida(BaseModel):
     respuestas: Dict[str, Union[int, None]]
     resultado: List[List[Union[str, float]]]
-    acertado: Optional[bool] = None            # nuevo
-    propuesto: Optional[str] = None            # nuevo
-
+    acertado: Optional[bool] = None
+    propuesto: Optional[str] = None
+    personaje_real: Optional[str] = None     
+    motivo_fallo: Optional[str] = None        
 # ==== ENDPOINTS ====
 @router.post("/guardar_partida")
 def guardar_partida(partida: Partida):
     doc = partida.dict()
     doc["timestamp"] = datetime.utcnow().isoformat()
     db["partidas"].insert_one(doc)
+
+    # Guardar si fue fallida para mejorar después
+    if partida.acertado is False and partida.propuesto:
+        print(f"⚠ Partida fallida: propuso {partida.propuesto}, real {partida.personaje_real}")
+
     return {"mensaje": "✅ Partida guardada correctamente"}
+@router.get("/partidas")
+def listar_partidas(limit: int = 50):
+    cur = db["partidas"].find({}, {"_id": 0}).sort("timestamp", -1).limit(limit)
+    return {"partidas": list(cur)}
+@router.get("/partidas_fallidas")
+def partidas_fallidas():
+    return {"partidas": list(db["partidas"].find({"acertado": False}, {"_id": 0}).sort("timestamp", -1))}
+
+@router.get("/sugerir_pregunta")
+def sugerir_pregunta():
+    # Buscar preguntas que más aparecen como null en fallidas
+    pipeline = [
+        {"$match": {"acertado": False}},
+        {"$project": {"respuestas": 1}},
+        {"$unwind": {"path": "$respuestas"}},
+        {"$match": {"respuestas": None}},
+        {"$group": {"_id": "$respuestas", "frecuencia": {"$sum": 1}}},
+        {"$sort": {"frecuencia": -1}},
+        {"$limit": 5}
+    ]
+    sugerencias = list(db["partidas"].aggregate(pipeline))
+    return {"sugerencias": sugerencias}
 
 @router.get("/partidas")
 def listar_partidas(limit: int = 50):

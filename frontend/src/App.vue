@@ -3,7 +3,7 @@
     <header class="bg-white shadow p-4 flex gap-4">
       <router-link to="/" class="hover:underline">Inicio</router-link>
       <router-link to="/jugar" class="hover:underline">Jugar</router-link>
-      <router-link to="/crear" class="hover:underline">Crear Pregunta</router-link>
+      <!--<router-link to="/crear" class="hover:underline">Crear Pregunta</router-link>-->
       <router-link to="/historial" class="hover:underline">Historial</router-link>
     </header>
     <main class="p-6">
