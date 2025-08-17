@@ -6,6 +6,8 @@ from rutas.partidas import router as partidas_router
 from rutas.preguntas import router as preguntas_router
 from rutas.inferencia import router as inferencia_router
 from rutas.pregunta_siguiente import router as pregunta_siguiente_router
+from rutas.fallos import router as fallos_router
+from rutas.personajes import router as personajes_router
 
 app = FastAPI()
 
@@ -25,7 +27,8 @@ app.include_router(partidas_router, tags=["Partidas"])
 app.include_router(inferencia_router)
 app.include_router(pregunta_siguiente_router)
 app.include_router(preguntas_router, prefix="/preguntas", tags=["Preguntas"])
-
+app.include_router(fallos_router)
+app.include_router(personajes_router, tags=["personajes"])
 @app.post("/inferir")
 def inferir(respuestas: RespuestasUsuario):
     try:

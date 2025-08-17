@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 from db import db
+import random
 
 router = APIRouter()
 
 @router.get("/activas")
-def obtener_preguntas_activas():
-    coleccion = db["preguntas"]
-    preguntas = list(coleccion.find({}, {"_id": 0}))
+def listar_preguntas():
+    preguntas = list(db["preguntas"].find({}, {"_id": 0}))
+    random.shuffle(preguntas)  # 🔹 Mezcla aleatoria
     return {"preguntas": preguntas}
